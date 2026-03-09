@@ -907,6 +907,367 @@ Expected output:
 
 ---
 
+## Step 4: Gold Layer — Business KPI Aggregations
+
+> **Why Gold?** Silver 是干净的明细数据，但没人看 10,000 行的 fact 表。
+> Gold 层把明细聚合成业务指标——这就是 Power BI 直接消费的数据。
+> 类比：Silver 是食材（洗好切好），Gold 是做好的菜（端上桌直接吃）。
+
+### 4.1 Create Gold Notebook
+
+1. 回到 workspace 页面
+2. 点击 **+ New item** → **Notebook**
+3. 重命名为 `03_gold_aggregation`
+4. 关联 Lakehouse → 选 `lh_ecommerce`
+
+### 4.2 逐 Cell 运行代码
+
+---
+
+**Cell 1: Imports**
+
+```python
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+```
+
+---
+
+**Cell 2: daily_sales_summary — Time Series for Trend Analysis**
+
+> **Grain:** one row per date per platform
+> **Purpose:** Powers the Executive Summary dashboard — GMV trend lines,
+> month-over-month growth, seasonality detection.
+>
+> 这是最常见的聚合粒度。Power BI 的折线图、柱状图都从这张表取数。
+> 面试时说 "daily grain with platform dimension" 就很专业。
+
+```python
+df_orders = spark.table("fact_orders")
+
+df_daily_sales = df_orders.filter(
+    F.col("order_date_utc").isNotNull()
+).groupBy(
+    F.date_format("order_date_utc", "yyyy-MM-dd").alias("order_date"),
+    "platform"
+).agg(
+    F.count("*").alias("order_count"),
+    F.countDistinct("order_id").alias("unique_orders"),
+    F.round(F.sum("gross_sales"), 2).alias("gmv"),
+    F.round(F.sum("discount_amount"), 2).alias("total_discounts"),
+    F.round(F.sum("total"), 2).alias("total_revenue"),
+    F.round(F.avg("gross_sales"), 2).alias("avg_order_value"),
+    F.sum("quantity").alias("units_sold"),
+)
+
+# Add month column for easier Power BI slicing and filtering
+df_daily_sales = df_daily_sales.withColumn(
+    "order_month", F.substring("order_date", 1, 7)  # "2025-03"
+)
+
+print(f"daily_sales_summary: {df_daily_sales.count()} rows")
+df_daily_sales.orderBy("order_date", "platform").show(15, truncate=False)
+```
+
+Expected output: ~1,000 rows（365 天 × 3 平台，但不是每天每平台都有订单）
+
+---
+
+**Cell 3: product_performance — SKU-Level Analytics**
+
+> **Grain:** one row per product per platform per month
+> **Purpose:** Identify top-selling products, compare SKU performance across channels,
+> track refund rates by product.
+>
+> 为什么用月粒度而不是日粒度？
+> 产品维度的分析不需要每天看，月度趋势更有 business value，也减少了数据量。
+> Power BI 里按月看产品排名变化更有意义。
+
+```python
+df_orders = spark.table("fact_orders")
+df_products = spark.table("dim_products")
+
+df_product_perf = df_orders.filter(
+    F.col("product_id").isNotNull()
+).withColumn(
+    "order_month", F.date_format("order_date_utc", "yyyy-MM")
+).groupBy(
+    "product_id", "platform", "order_month"
+).agg(
+    F.count("*").alias("order_count"),
+    F.sum("quantity").alias("units_sold"),
+    F.round(F.sum("gross_sales"), 2).alias("gmv"),
+    F.round(F.avg("gross_sales"), 2).alias("avg_selling_price"),
+)
+
+# Enrich with product attributes from dim_products (product_name, category)
+df_product_perf = df_product_perf.join(
+    df_products.select("product_id", "product_name", "category", "base_price_usd"),
+    on="product_id",
+    how="left"
+)
+
+# Add refund data — count refunded/cancelled orders per product
+# Shopify: Financial Status = 'refunded', Amazon: order-status = 'Cancelled'
+df_refunds = df_orders.filter(
+    (F.col("order_status") == "refunded") | (F.col("order_status") == "Cancelled")
+).withColumn(
+    "order_month", F.date_format("order_date_utc", "yyyy-MM")
+).groupBy(
+    "product_id", "platform", "order_month"
+).agg(
+    F.count("*").alias("refund_count")
+)
+
+# Left join refunds — orders without refunds get 0
+df_product_perf = df_product_perf.join(
+    df_refunds,
+    on=["product_id", "platform", "order_month"],
+    how="left"
+).fillna({"refund_count": 0})
+
+# Calculate refund rate as percentage
+df_product_perf = df_product_perf.withColumn(
+    "refund_rate",
+    F.round(F.col("refund_count") / F.col("order_count") * 100, 2)
+)
+
+print(f"product_performance: {df_product_perf.count()} rows")
+df_product_perf.orderBy(F.desc("gmv")).show(15, truncate=False)
+```
+
+Expected output: ~400-500 rows（14 产品 × 3 平台 × 12 月，但不是每月每平台都有每个产品）
+
+---
+
+**Cell 4: channel_analysis — Platform Fee Structure Comparison**
+
+> **Grain:** one row per platform per month
+> **Purpose:** Answer the core business question: "Which channel is most profitable?"
+> Compare gross revenue, platform fees, fulfillment costs, affiliate commissions,
+> and net margin across Shopify vs Amazon vs TikTok.
+>
+> 渠道对比分析——回答"哪个平台最赚钱？"
+> 这是 Channel Deep Dive 报表页面的数据源。
+> 面试时可以说："I built a channel profitability analysis comparing fee structures
+> across three marketplaces."
+
+```python
+df_financials = spark.table("fact_financials")
+
+df_channel = df_financials.filter(
+    F.col("order_date_utc").isNotNull()
+).withColumn(
+    "order_month", F.date_format("order_date_utc", "yyyy-MM")
+).groupBy(
+    "platform", "order_month"
+).agg(
+    F.count("*").alias("order_count"),
+    F.round(F.sum("gross_revenue"), 2).alias("gross_revenue"),
+    F.round(F.sum("platform_fee"), 2).alias("platform_fees"),
+    F.round(F.sum("fulfillment_fee"), 2).alias("fulfillment_fees"),
+    F.round(F.sum("affiliate_commission"), 2).alias("affiliate_costs"),
+    F.round(F.sum("net_revenue"), 2).alias("net_revenue"),
+)
+
+# Calculate key business ratios
+# fee_ratio: what percentage of revenue goes to platform fees
+# net_margin: what percentage of revenue the seller actually keeps
+df_channel = df_channel.withColumn(
+    "total_fees",
+    F.round(F.col("platform_fees") + F.col("fulfillment_fees") + F.col("affiliate_costs"), 2)
+).withColumn(
+    "fee_ratio_pct",
+    F.round(F.abs(F.col("total_fees")) / F.col("gross_revenue") * 100, 2)
+).withColumn(
+    "net_margin_pct",
+    F.round(F.col("net_revenue") / F.col("gross_revenue") * 100, 2)
+)
+
+print(f"channel_analysis: {df_channel.count()} rows")
+df_channel.orderBy("platform", "order_month").show(20, truncate=False)
+```
+
+Expected output: 36 rows（3 平台 × 12 月）。注意看 `net_margin_pct`：
+- Shopify ≈ 100%（数据中没有支付处理费）
+- Amazon ≈ 76-80%（佣金 + FBA 费）
+- TikTok ≈ 82-86%（平台费 + 达人佣金）
+
+---
+
+**Cell 5: customer_cohort — Repeat Purchase & Retention Analysis (Shopify Only)**
+
+> **What is cohort analysis?**
+> Group customers by their first purchase month (the "cohort"), then track
+> how many come back to purchase again in subsequent months.
+>
+> Example: 100 customers first bought in January (cohort = Jan).
+> In February, 15 of them bought again → retention rate = 15%.
+> In March, 8 of them bought again → retention rate = 8%.
+>
+> **Why only Shopify?** Amazon and TikTok don't share customer emails,
+> so we can't identify repeat buyers on those platforms.
+>
+> **面试高频题：** Cohort analysis vs overall retention rate?
+> Cohort 能看出不同时间获取的客户质量差异。
+> 比如节假日获取的客户可能留存更低（冲动消费），而自然流量客户留存更高。
+
+```python
+df_orders = spark.table("fact_orders")
+
+# Only Shopify has customer email for cohort tracking
+df_shopify = df_orders.filter(
+    (F.col("platform") == "Shopify") &
+    (F.col("customer_email") != "unknown") &
+    (F.col("order_date_utc").isNotNull())
+).withColumn(
+    "order_month", F.date_format("order_date_utc", "yyyy-MM")
+)
+
+# Step 1: Find each customer's first purchase month (= their cohort)
+df_first_purchase = df_shopify.groupBy("customer_email").agg(
+    F.min("order_month").alias("cohort_month")
+)
+
+# Step 2: Join cohort assignment back to every order
+df_cohort_orders = df_shopify.join(
+    df_first_purchase, on="customer_email", how="left"
+)
+
+# Step 3: Calculate months since first purchase (period offset)
+# period 0 = first purchase month, period 1 = next month, etc.
+df_cohort_orders = df_cohort_orders.withColumn(
+    "months_since_first",
+    F.months_between(
+        F.to_date("order_month", "yyyy-MM"),
+        F.to_date("cohort_month", "yyyy-MM")
+    ).cast("int")
+)
+
+# Step 4: Aggregate — unique customers per cohort per period
+df_customer_cohort = df_cohort_orders.groupBy(
+    "cohort_month", "months_since_first"
+).agg(
+    F.countDistinct("customer_email").alias("active_customers"),
+    F.count("*").alias("order_count"),
+    F.round(F.sum("gross_sales"), 2).alias("cohort_revenue"),
+)
+
+# Add cohort size (how many customers first purchased in that month)
+# This is the denominator for retention rate calculation
+df_cohort_size = df_first_purchase.groupBy("cohort_month").agg(
+    F.count("*").alias("cohort_size")
+)
+
+df_customer_cohort = df_customer_cohort.join(
+    df_cohort_size, on="cohort_month", how="left"
+).withColumn(
+    "retention_rate_pct",
+    F.round(F.col("active_customers") / F.col("cohort_size") * 100, 2)
+)
+
+print(f"customer_cohort: {df_customer_cohort.count()} rows")
+df_customer_cohort.orderBy("cohort_month", "months_since_first").show(20, truncate=False)
+```
+
+Expected output: ~100-150 rows。`months_since_first = 0` 的行 retention = 100%（首购月），
+后续月份逐步下降。
+
+---
+
+**Cell 6: Write All Gold Tables to Lakehouse**
+
+> Gold tables are the final output of the data pipeline.
+> Power BI connects directly to these tables via DirectLake mode.
+> `mode("overwrite")` for idempotency — same principle as Silver layer.
+
+```python
+gold_tables = {
+    "daily_sales_summary": df_daily_sales,
+    "product_performance": df_product_perf,
+    "channel_analysis": df_channel,
+    "customer_cohort": df_customer_cohort,
+}
+
+for table_name, df in gold_tables.items():
+    df.write.format("delta").mode("overwrite").saveAsTable(table_name)
+    print(f"Saved {table_name}: {df.count():,} rows")
+
+print("\nAll Gold tables created successfully!")
+```
+
+---
+
+**Cell 7: Gold Layer Validation**
+
+> 最终验证。**这个输出非常适合截图放到 README 里。**
+
+```python
+print("=" * 60)
+print("Gold Layer Validation Report")
+print("=" * 60)
+
+# 1. Table row counts
+print("\n--- Table Row Counts ---")
+for table in ["daily_sales_summary", "product_performance", "channel_analysis", "customer_cohort"]:
+    count = spark.table(table).count()
+    print(f"  {table}: {count:,} rows")
+
+# 2. Monthly GMV trend — the core business metric
+print("\n--- Monthly GMV by Platform ---")
+spark.table("daily_sales_summary").groupBy("order_month", "platform") \
+    .agg(F.round(F.sum("gmv"), 2).alias("monthly_gmv")) \
+    .orderBy("order_month", "platform").show(36, truncate=False)
+
+# 3. Top 5 products by total GMV
+print("--- Top 5 Products by GMV ---")
+spark.table("product_performance").groupBy("product_name") \
+    .agg(F.round(F.sum("gmv"), 2).alias("total_gmv")) \
+    .orderBy(F.desc("total_gmv")).show(5, truncate=False)
+
+# 4. Channel net margin comparison — the money question
+print("--- Channel Net Margin (Full Year) ---")
+spark.table("channel_analysis").groupBy("platform").agg(
+    F.round(F.sum("gross_revenue"), 2).alias("gross_revenue"),
+    F.round(F.sum("net_revenue"), 2).alias("net_revenue"),
+    F.round(F.avg("fee_ratio_pct"), 2).alias("avg_fee_ratio_pct"),
+    F.round(F.avg("net_margin_pct"), 2).alias("avg_net_margin_pct"),
+).orderBy("platform").show(truncate=False)
+
+# 5. Cohort retention snapshot — first 3 months
+print("--- Customer Cohort: First 3 Months Retention ---")
+spark.table("customer_cohort").filter(
+    F.col("months_since_first") <= 3
+).orderBy("cohort_month", "months_since_first").show(20, truncate=False)
+```
+
+Expected output:
+1. 4 张 Gold 表行数
+2. 月度 GMV 趋势（应该能看到 Nov-Dec 的 holiday spike）
+3. Top 5 产品排名
+4. 三平台净利润率对比
+5. 客户留存率（首 3 个月）
+
+### 4.3 验证和截图
+
+运行完所有 Cell 后：
+
+1. 回到 Lakehouse，刷新 Tables 列表
+2. 应该看到 Bronze (5) + Silver (4) + Gold (4) = **13 张表**
+3. 截图保存：
+   - `gold_tables_overview.png` — 完整的 13 张表列表（Medallion 三层全貌）
+   - `gold_validation_report.png` — Cell 7 验证输出
+   - `gold_monthly_gmv.png` — 月度 GMV 趋势（展示季节性）
+   - `gold_channel_margin.png` — 渠道净利润对比（面试亮点）
+
+### 4.4 Export Notebook
+
+1. Notebook 页面 → **...** → **Export** → **Export as .py**
+2. 重命名为 `03_gold_aggregation.py`
+3. 放到 `notebooks/` 目录，commit 到 GitHub
+
+---
+
 ## 操作顺序 Checklist
 
 ### Step 2: Bronze Layer
@@ -927,4 +1288,12 @@ Expected output:
 - [ ] 逐 Cell 运行 12 个代码块
 - [ ] 验证 4 张 Silver 表存在且数据正确
 - [ ] 截图存档（重点截 Validation Report 和 Pivot 结果）
+- [ ] 导出 Notebook 到 GitHub
+
+### Step 4: Gold Layer
+- [ ] 创建 Notebook `03_gold_aggregation`
+- [ ] 关联 Lakehouse `lh_ecommerce`
+- [ ] 逐 Cell 运行 7 个代码块
+- [ ] 验证 4 张 Gold 表存在且数据正确
+- [ ] 截图存档（重点截 Monthly GMV 和 Channel Margin）
 - [ ] 导出 Notebook 到 GitHub
