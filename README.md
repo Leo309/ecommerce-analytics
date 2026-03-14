@@ -49,6 +49,7 @@ A simulated US-based DTC coffee concentrate brand (similar to Javy Coffee) selli
 | Data Generation | Python (Faker, Pandas) |
 | Lakehouse | Microsoft Fabric |
 | ETL | PySpark / Spark SQL (Fabric Notebooks) |
+| Orchestration | Fabric Pipeline (scheduled weekly) |
 | Modeling | Medallion Architecture (Bronze → Silver → Gold) |
 | Visualization | Power BI (DirectLake mode) |
 | Version Control | Git + GitHub |
@@ -71,7 +72,7 @@ ecommerce-analytics/
 │   └── 03_gold_aggregation.py
 ├── sql/
 │   └── transformations.sql
-├── reports/                     # Power BI screenshots
+├── reports/                     # Power BI & pipeline screenshots
 ├── docs/
 │   ├── architecture.md
 │   ├── data_dictionary.md
@@ -98,15 +99,28 @@ ecommerce-analytics/
 - **Repeat Purchase Rate** — Shopify only (has customer data)
 - **TikTok Creator ROI** — Commission vs GMV driven
 
-## Power BI Reports
+## Power BI Dashboard
 
-| Page | Focus |
-|------|-------|
-| Executive Summary | GMV trend, channel mix, MoM growth, KPI cards |
-| Product Performance | SKU ranking, refund rates, cross-platform comparison |
-| Channel Deep Dive | Fee structures, net margin, TikTok creator ROI |
+### Executive Summary
+GMV trend, channel mix, KPI cards (Total GMV, Orders, AOV, Revenue)
 
-> Screenshots will be added after Power BI report completion.
+![Executive Summary](reports/dashboard_executive_summary.png)
+
+### Product Performance
+SKU ranking by GMV, refund rates by platform, revenue by category
+
+![Product Performance](reports/dashboard_product_performance.png)
+
+### Channel Deep Dive
+Net margin trend, fee ratio comparison, Shopify customer cohort retention
+
+![Channel Deep Dive](reports/dashboard_channel_deep_dive.png)
+
+## Pipeline Orchestration
+
+Fabric Pipeline automates the full ETL flow: Bronze → Silver → Gold, scheduled weekly.
+
+![Pipeline](reports/pipeline_orchestration.png)
 
 ## Getting Started
 
