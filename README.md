@@ -12,34 +12,34 @@ A simulated US-based DTC coffee concentrate brand (similar to Javy Coffee) selli
 ## Architecture
 
 ```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Shopify    │    │   Amazon    │    │ TikTok Shop │
-│  Orders CSV  │    │ Orders TSV  │    │ Settlement  │
-│              │    │ Settle TSV  │    │    XLSX     │
-└──────┬───────┘    └──────┬──────┘    └──────┬──────┘
-       │                   │                  │
-       └───────────┬───────┴──────────┬───────┘
-                   ▼                  ▼
-         ┌─────────────────────────────────┐
-         │      Bronze Layer (Raw)         │
-         │   Raw files → Delta tables      │
-         └──────────────┬──────────────────┘
-                        ▼
-         ┌─────────────────────────────────┐
-         │     Silver Layer (Cleaned)      │
-         │  Standardize dates, currency,   │
-         │  SKU mapping, dedup, pivot      │
-         └──────────────┬──────────────────┘
-                        ▼
-         ┌─────────────────────────────────┐
-         │      Gold Layer (Business)      │
-         │  KPI aggregations, summaries    │
-         └──────────────┬──────────────────┘
-                        ▼
-         ┌─────────────────────────────────┐
-         │         Power BI Reports        │
-         │  3-page executive dashboard     │
-         └─────────────────────────────────┘
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│   Shopify    │   │    Amazon    │   │  TikTok Shop │
+│  Orders CSV  │   │  Orders TSV  │   │  Settlement  │
+│              │   │  Settle TSV  │   │     XLSX     │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │
+       └──────────┬───────┴──────────┬───────┘
+                  ▼                  ▼
+        ┌────────────────────────────────────┐
+        │       Bronze Layer (Raw)           │
+        │    Raw files → Delta tables        │
+        └────────────────┬───────────────────┘
+                         ▼
+        ┌────────────────────────────────────┐
+        │      Silver Layer (Cleaned)        │
+        │   Standardize dates, currency,     │
+        │   SKU mapping, dedup, pivot        │
+        └────────────────┬───────────────────┘
+                         ▼
+        ┌────────────────────────────────────┐
+        │      Gold Layer (Business)         │
+        │    KPI aggregations, summaries     │
+        └────────────────┬───────────────────┘
+                         ▼
+        ┌────────────────────────────────────┐
+        │        Power BI Dashboard          │
+        │    3-page executive reports        │
+        └────────────────────────────────────┘
 ```
 
 ## Tech Stack
